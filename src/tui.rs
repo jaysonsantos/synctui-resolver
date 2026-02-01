@@ -14,7 +14,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Terminal;
 use std::collections::BTreeSet;
 use std::io::{self, Stdout};
@@ -51,6 +51,7 @@ enum Mode {
 struct App {
     root: PathBuf,
     apply: bool,
+    include_hidden: bool,
     mode: Mode,
     groups: Vec<ConflictGroup>,
     list_state: ListState,
@@ -58,6 +59,7 @@ struct App {
     selected_groups: BTreeSet<usize>,
     message: String,
     planned_ops: Vec<String>,
+    planned_targets: Vec<usize>,
 }
 
 pub fn run(args: Args) -> Result<()> {
@@ -70,6 +72,7 @@ pub fn run(args: Args) -> Result<()> {
     let mut app = App {
         root,
         apply: args.apply,
+        include_hidden: args.include_hidden,
         mode: Mode::List,
         groups,
         list_state: ListState::default(),
@@ -77,6 +80,7 @@ pub fn run(args: Args) -> Result<()> {
         selected_groups: BTreeSet::new(),
         message: String::new(),
         planned_ops: Vec::new(),
+        planned_targets: Vec::new(),
     };
 
     if !app.groups.is_empty() {
@@ -133,6 +137,18 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) ->
 fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<bool> {
     match (app.mode, code, mods) {
         (_, KeyCode::Char('c'), KeyModifiers::CONTROL) => return Ok(true),
+
+        (Mode::List, KeyCode::Char('t'), _)
+        | (Mode::Pick, KeyCode::Char('t'), _)
+        | (Mode::Confirm, KeyCode::Char('t'), _) => {
+            app.apply = !app.apply;
+            app.message = if app.apply {
+                "Mode: APPLY (will move files)".to_string()
+            } else {
+                "Mode: DRY-RUN (no filesystem changes)".to_string()
+            };
+        }
+
         (Mode::List, KeyCode::Char('q'), _) => return Ok(true),
         (Mode::Pick, KeyCode::Esc, _) => {
             app.mode = Mode::List;
@@ -141,6 +157,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<bool> 
         (Mode::Confirm, KeyCode::Esc, _) => {
             app.mode = Mode::List;
             app.planned_ops.clear();
+            app.planned_targets.clear();
             app.message.clear();
         }
         (Mode::List, KeyCode::Down, _) => list_down(&mut app.list_state, app.groups.len()),
@@ -154,21 +171,87 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<bool> 
             list_up(&mut app.pick_state, len)
         }
         (Mode::List, KeyCode::Char(' '), _) => toggle_selected(app),
+
+        // Quick-pick from list view
+        (Mode::List, KeyCode::Char('c'), _) | (Mode::List, KeyCode::Char('o'), _) => {
+            pick_kind_for_targets(app, PickKind::Current, false)?;
+        }
+        (Mode::List, KeyCode::Char('n'), _) => {
+            pick_kind_for_targets(app, PickKind::Newest, false)?;
+        }
+        (Mode::List, KeyCode::Char('p'), _) => {
+            pick_kind_for_targets(app, PickKind::Oldest, false)?;
+        }
+        (Mode::List, KeyCode::Char('C'), _) | (Mode::List, KeyCode::Char('O'), _) => {
+            pick_kind_for_targets(app, PickKind::Current, true)?;
+        }
+        (Mode::List, KeyCode::Char('N'), _) => {
+            pick_kind_for_targets(app, PickKind::Newest, true)?;
+        }
+        (Mode::List, KeyCode::Char('P'), _) => {
+            pick_kind_for_targets(app, PickKind::Oldest, true)?;
+        }
+
         (Mode::List, KeyCode::Enter, _) => enter_pick(app)?,
         (Mode::Pick, KeyCode::Enter, _) => pick_current(app)?,
         (Mode::Pick, KeyCode::Char('o'), _) => pick_original(app)?,
         (Mode::Pick, KeyCode::Char('n'), _) => pick_newest(app)?,
+        (Mode::Pick, KeyCode::Char('p'), _) => pick_oldest(app)?,
         (Mode::List, KeyCode::Char('A'), _) => plan_and_confirm(app, true)?,
         (Mode::List, KeyCode::Char('a'), _) => plan_and_confirm(app, false)?,
         (Mode::Confirm, KeyCode::Char('y'), _) => apply_plan(app)?,
         (Mode::Confirm, KeyCode::Char('n'), _) => {
             app.mode = Mode::List;
             app.planned_ops.clear();
+            app.planned_targets.clear();
             app.message = "Cancelled".to_string();
         }
         _ => {}
     }
     Ok(false)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PickKind {
+    Current,
+    Newest,
+    Oldest,
+}
+
+fn pick_kind_for_targets(app: &mut App, kind: PickKind, selected_only: bool) -> Result<()> {
+    let mut targets: Vec<usize> = if selected_only {
+        app.selected_groups.iter().copied().collect()
+    } else {
+        app.list_state.selected().into_iter().collect()
+    };
+    targets.sort_unstable();
+    if targets.is_empty() {
+        app.message = "No groups selected".to_string();
+        return Ok(());
+    }
+
+    for gi in targets {
+        let idx = match kind {
+            PickKind::Current => Some(0),
+            PickKind::Newest => app.groups[gi].newest_idx().or(Some(0)),
+            PickKind::Oldest => app.groups[gi].oldest_idx().or(Some(0)),
+        };
+        app.groups[gi].chosen = idx;
+
+        // Selecting a choice from the main list implies selecting the group.
+        // This matches the Space behavior so the user can batch-confirm quickly.
+        app.selected_groups.insert(gi);
+    }
+
+    app.message = match (kind, selected_only) {
+        (PickKind::Current, false) => "Picked current".to_string(),
+        (PickKind::Newest, false) => "Picked newest".to_string(),
+        (PickKind::Oldest, false) => "Picked oldest".to_string(),
+        (PickKind::Current, true) => "Picked current for selected".to_string(),
+        (PickKind::Newest, true) => "Picked newest for selected".to_string(),
+        (PickKind::Oldest, true) => "Picked oldest for selected".to_string(),
+    };
+    Ok(())
 }
 
 fn list_down(state: &mut ListState, len: usize) {
@@ -261,6 +344,20 @@ fn pick_newest(app: &mut App) -> Result<()> {
     Ok(())
 }
 
+fn pick_oldest(app: &mut App) -> Result<()> {
+    let gi = app
+        .list_state
+        .selected()
+        .ok_or_else(|| anyhow!("no selection"))?;
+    let idx = app.groups[gi]
+        .oldest_idx()
+        .ok_or_else(|| anyhow!("no mtime"))?;
+    app.groups[gi].chosen = Some(idx);
+    app.mode = Mode::List;
+    app.message = "Picked oldest".to_string();
+    Ok(())
+}
+
 fn plan_and_confirm(app: &mut App, all_selected: bool) -> Result<()> {
     let mut targets: Vec<usize> = if all_selected {
         app.selected_groups.iter().copied().collect()
@@ -275,15 +372,18 @@ fn plan_and_confirm(app: &mut App, all_selected: bool) -> Result<()> {
     }
 
     app.planned_ops.clear();
+    app.planned_targets.clear();
     for &gi in &targets {
         let g = &app.groups[gi];
         let Some(ci) = g.chosen else {
             app.message = "Pick a version first (Enter)".to_string();
             app.planned_ops.clear();
+            app.planned_targets.clear();
             return Ok(());
         };
         plan_group_ops(app, gi, ci)?;
     }
+    app.planned_targets = targets;
     app.mode = Mode::Confirm;
     Ok(())
 }
@@ -309,30 +409,13 @@ fn plan_group_ops(app: &mut App, gi: usize, chosen_idx: usize) -> Result<()> {
 }
 
 fn apply_plan(app: &mut App) -> Result<()> {
-    // Apply for current group or selected groups based on what was planned.
-    // Recompute targets the same way as plan step (based on non-empty planned_ops).
-    // This keeps logic simple: user can always re-plan if selection changed.
-    let mut targets: Vec<usize> = app
-        .groups
-        .iter()
-        .enumerate()
-        .filter(|(_, g)| g.chosen.is_some())
-        .map(|(i, _)| i)
-        .collect();
+    let targets = app.planned_targets.clone();
     if targets.is_empty() {
-        app.message = "Nothing to apply".to_string();
+        app.message = "Nothing planned".to_string();
         app.mode = Mode::List;
         app.planned_ops.clear();
         return Ok(());
     }
-
-    // Prefer applying only selected if any are selected, otherwise just current.
-    if !app.selected_groups.is_empty() {
-        targets.retain(|i| app.selected_groups.contains(i));
-    } else if let Some(i) = app.list_state.selected() {
-        targets.retain(|x| *x == i);
-    }
-    targets.sort_unstable();
 
     let mut errors = Vec::new();
     for gi in targets {
@@ -348,16 +431,25 @@ fn apply_plan(app: &mut App) -> Result<()> {
         }
     }
 
-    app.planned_ops.clear();
     if errors.is_empty() {
-        app.message = if app.apply {
-            "Applied".to_string()
-        } else {
-            "Dry-run only (re-run with --apply)".to_string()
-        };
-        app.mode = Mode::Done;
+        if app.apply {
+            app.planned_ops.clear();
+            app.planned_targets.clear();
+            rescan(app)?;
+            app.mode = Mode::List;
+            app.message = "Applied".to_string();
+            return Ok(());
+        }
+
+        // Dry-run: keep the confirmation open so the user can toggle apply and run again.
+        app.mode = Mode::Confirm;
+        app.message =
+            "Dry-run complete. Toggle apply with 't', then press 'y' to apply.".to_string();
         return Ok(());
     }
+
+    app.planned_ops.clear();
+    app.planned_targets.clear();
 
     app.message = format!(
         "Some groups failed ({}). See details in the log panel.",
@@ -365,6 +457,18 @@ fn apply_plan(app: &mut App) -> Result<()> {
     );
     app.planned_ops = errors;
     app.mode = Mode::Confirm;
+    Ok(())
+}
+
+fn rescan(app: &mut App) -> Result<()> {
+    let groups = scan_conflicts(&app.root, app.include_hidden)?;
+    app.groups = groups;
+    app.selected_groups.clear();
+    app.list_state = ListState::default();
+    app.pick_state = ListState::default();
+    if !app.groups.is_empty() {
+        app.list_state.select(Some(0));
+    }
     Ok(())
 }
 
@@ -423,32 +527,56 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
+            Constraint::Length(4),
             Constraint::Min(0),
             Constraint::Length(5),
         ])
         .split(area);
 
-    let header = Paragraph::new(Line::from(vec![
-        Span::styled(
-            "synctui-resolver",
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::raw(format!("root: {}", app.root.display())),
-        Span::raw("  "),
-        Span::styled(
-            if app.apply { "APPLY" } else { "DRY-RUN" },
-            Style::default().fg(if app.apply { Color::Green } else { Color::Yellow }),
-        ),
-        Span::raw("  "),
-        Span::raw(match app.mode {
-            Mode::List => "[List]  Enter: pick  Space: select  a: confirm current  A: confirm selected  q: quit",
-            Mode::Pick => "[Pick]  Up/Down  Enter: choose  o: original  n: newest  Esc: back",
-            Mode::Confirm => "[Confirm]  y: run  n: cancel  Esc: back",
-            Mode::Done => "[Done]",
+    let mode_badge = Span::styled(
+        if app.apply { "APPLY" } else { "DRY-RUN" },
+        Style::default().fg(if app.apply {
+            Color::Green
+        } else {
+            Color::Yellow
         }),
-    ]));
+    );
+
+    let help = match app.mode {
+        Mode::List => "List: Up/Down | Enter pick specific | Space select | c current, n newest, p oldest (uppercase = selected) | a/A confirm | t toggle apply | q quit",
+        Mode::Pick => "Pick: Up/Down | Enter choose | o current | n newest | p oldest | t toggle apply | Esc back",
+        Mode::Confirm => "Confirm: y run | t toggle apply | n cancel | Esc back",
+        Mode::Done => "Done",
+    };
+
+    let root_str = app.root.display().to_string();
+    let root_max = (area.width as usize).saturating_sub(26).max(20);
+    let root_short = shorten_middle(&root_str, root_max);
+
+    let selected = app.selected_groups.len();
+    let chosen = app.groups.iter().filter(|g| g.chosen.is_some()).count();
+    let counts = format!(
+        "groups:{}  picked:{}  selected:{}",
+        app.groups.len(),
+        chosen,
+        selected
+    );
+
+    let header = Paragraph::new(vec![
+        Line::from(vec![
+            Span::styled(
+                "synctui-resolver",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            mode_badge,
+            Span::raw("  "),
+            Span::raw(format!("root: {root_short}")),
+        ]),
+        Line::from(Span::raw(counts)),
+        Line::from(Span::raw(help)),
+    ])
+    .wrap(Wrap { trim: true });
     f.render_widget(header, chunks[0]);
 
     match app.mode {
@@ -457,6 +585,118 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     }
 
     draw_footer(f, app, chunks[2]);
+
+    if app.mode == Mode::Confirm {
+        draw_confirm_modal(f, app, chunks[1]);
+    }
+}
+
+fn shorten_middle(s: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max_chars {
+        return s.to_string();
+    }
+    if max_chars <= 5 {
+        return chars.into_iter().take(max_chars).collect();
+    }
+
+    let keep = (max_chars - 3) / 2;
+    let head: String = chars.iter().take(keep).collect();
+    let tail: String = chars
+        .iter()
+        .rev()
+        .take(keep)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("{head}...{tail}")
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
+}
+
+fn draw_confirm_modal(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
+    let rect = centered_rect(80, 70, area);
+    f.render_widget(Clear, rect);
+
+    let title = if app.apply {
+        Span::styled(
+            "CONFIRM APPLY",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled(
+            "CONFIRM DRY-RUN",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+    };
+
+    let mut lines = Vec::new();
+    if app.apply {
+        lines.push(Line::from(Span::styled(
+            "This will move files on disk.",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "Dry-run: no filesystem changes.",
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+    lines.push(Line::from(""));
+
+    let planned = if app.planned_targets.is_empty() {
+        "No groups planned".to_string()
+    } else {
+        format!("Planned groups: {}", app.planned_targets.len())
+    };
+    lines.push(Line::from(planned));
+    lines.push(Line::from(""));
+
+    lines.push(Line::from(vec![
+        Span::styled("y", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(": run   "),
+        Span::styled("t", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(": toggle apply   "),
+        Span::styled("n", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(": cancel"),
+    ]));
+    lines.push(Line::from(""));
+
+    if !app.planned_ops.is_empty() {
+        for l in app
+            .planned_ops
+            .iter()
+            .take((rect.height as usize).saturating_sub(9))
+        {
+            lines.push(Line::from(l.as_str()));
+        }
+    }
+
+    let p = Paragraph::new(lines)
+        .block(Block::default().borders(Borders::ALL).title(title))
+        .wrap(Wrap { trim: false });
+    f.render_widget(p, rect);
 }
 
 fn draw_list(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
@@ -571,6 +811,7 @@ mod tests {
         let mut app = App {
             root: PathBuf::from("/"),
             apply: false,
+            include_hidden: false,
             mode: Mode::List,
             groups: vec![],
             list_state: ListState::default(),
@@ -578,6 +819,7 @@ mod tests {
             selected_groups: BTreeSet::new(),
             message: String::new(),
             planned_ops: vec![],
+            planned_targets: vec![],
         };
         app.list_state.select(None);
         assert_eq!(current_group_len(&app), 0);
@@ -604,5 +846,37 @@ mod tests {
         assert_eq!(state.selected(), Some(0));
         list_up(&mut state, 3);
         assert_eq!(state.selected(), Some(0));
+    }
+
+    #[test]
+    fn list_quick_pick_also_selects_group() {
+        let g0 = ConflictGroup {
+            base_path: PathBuf::from("a"),
+            candidates: vec![],
+            chosen: None,
+        };
+        let g1 = ConflictGroup {
+            base_path: PathBuf::from("b"),
+            candidates: vec![],
+            chosen: None,
+        };
+
+        let mut app = App {
+            root: PathBuf::from("/"),
+            apply: false,
+            include_hidden: false,
+            mode: Mode::List,
+            groups: vec![g0, g1],
+            list_state: ListState::default(),
+            pick_state: ListState::default(),
+            selected_groups: BTreeSet::new(),
+            message: String::new(),
+            planned_ops: vec![],
+            planned_targets: vec![],
+        };
+        app.list_state.select(Some(1));
+
+        pick_kind_for_targets(&mut app, PickKind::Newest, false).unwrap();
+        assert!(app.selected_groups.contains(&1));
     }
 }
