@@ -1,0 +1,130 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test
+
+      - name: Clippy (warnings as errors)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo clippy --all-targets -- -D warnings
+
+  build:
+    name: build (${{ matrix.name }})
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            bin: synctui-resolver
+            ext: ""
+
+          - name: linux-aarch64
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            bin: synctui-resolver
+            ext: ""
+
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bin: synctui-resolver
+            ext: .exe
+
+          # macOS x86_64 intentionally omitted per request.
+          - name: darwin-aarch64
+            os: macos-14
+            target: aarch64-apple-darwin
+            bin: synctui-resolver
+            ext: ""
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install linux aarch64 linker
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build (release)
+        if: matrix.target != 'aarch64-unknown-linux-gnu'
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build (release, linux aarch64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        env:
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "dist/${{ matrix.bin }}"
+          tar -C dist -czf "stconflict-${{ matrix.target }}.tar.gz" "${{ matrix.bin }}"
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.bin }}${{ matrix.ext }}" "dist/${{ matrix.bin }}${{ matrix.ext }}"
+          Compress-Archive -Path "dist/${{ matrix.bin }}${{ matrix.ext }}" -DestinationPath "stconflict-${{ matrix.target }}.zip" -Force
+
+      - name: Upload artifact (unix)
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: stconflict-${{ matrix.target }}
+          path: stconflict-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+      - name: Upload artifact (windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: stconflict-${{ matrix.target }}
+          path: stconflict-${{ matrix.target }}.zip
+          if-no-files-found: error
