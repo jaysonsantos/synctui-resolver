@@ -18,7 +18,8 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use ratatui::Terminal;
 use std::collections::BTreeSet;
 use std::io::{self, Stdout};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, UNIX_EPOCH};
 
 #[derive(Clone, Copy, Debug)]
@@ -120,6 +121,7 @@ enum Mode {
     List,
     Pick,
     Confirm,
+    Error,
     Done,
 }
 
@@ -135,6 +137,9 @@ struct App {
     message: String,
     planned_ops: Vec<String>,
     planned_targets: Vec<usize>,
+
+    compare_error: Option<String>,
+    last_error: Option<String>,
 }
 
 pub fn run(args: Args) -> Result<()> {
@@ -156,6 +161,9 @@ pub fn run(args: Args) -> Result<()> {
         message: String::new(),
         planned_ops: Vec::new(),
         planned_targets: Vec::new(),
+
+        compare_error: None,
+        last_error: None,
     };
 
     if !app.groups.is_empty() {
@@ -190,7 +198,10 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result
 
 fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Result<()> {
     loop {
-        terminal.draw(|f| ui(f, app))?;
+        if let Err(e) = terminal.draw(|f| ui(f, app)) {
+            app.last_error = Some(format!("{e:#}"));
+            app.mode = Mode::Error;
+        }
 
         if app.mode == Mode::Done {
             return Ok(());
@@ -211,6 +222,13 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) ->
 
 fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<bool> {
     match (app.mode, code, mods) {
+        (Mode::Error, KeyCode::Esc, _)
+        | (Mode::Error, KeyCode::Enter, _)
+        | (Mode::Error, KeyCode::Char('q'), _) => {
+            app.mode = Mode::List;
+            app.last_error = None;
+        }
+
         (_, KeyCode::Char('c'), KeyModifiers::CONTROL) => return Ok(true),
 
         (Mode::List, KeyCode::Char('t'), _)
@@ -281,6 +299,11 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<bool> 
             app.planned_targets.clear();
             app.message = "Cancelled".to_string();
         }
+
+        (Mode::List, KeyCode::Char('d'), _) | (Mode::Pick, KeyCode::Char('d'), _) => {
+            launch_compare(app)?;
+        }
+
         _ => {}
     }
     Ok(false)
@@ -541,6 +564,8 @@ fn rescan(app: &mut App) -> Result<()> {
     app.selected_groups.clear();
     app.list_state = ListState::default();
     app.pick_state = ListState::default();
+    app.compare_error = None;
+    app.last_error = None;
     if !app.groups.is_empty() {
         app.list_state.select(Some(0));
     }
@@ -597,6 +622,120 @@ fn current_group_len(app: &App) -> usize {
     app.groups.get(i).map(|g| g.candidates.len()).unwrap_or(0)
 }
 
+fn current_group_paths(app: &App) -> Result<(PathBuf, PathBuf)> {
+    let gi = app
+        .list_state
+        .selected()
+        .ok_or_else(|| anyhow!("no selection"))?;
+    let g = app.groups.get(gi).ok_or_else(|| anyhow!("bad index"))?;
+
+    let chosen_idx = g.chosen.unwrap_or(0);
+    let left = g.base_path.clone();
+    let right = g
+        .candidates
+        .get(chosen_idx)
+        .map(|c| c.path.clone())
+        .unwrap_or(left.clone());
+
+    Ok((left, right))
+}
+
+fn compare_command(left: &Path, right: &Path) -> Command {
+    if cfg!(target_os = "windows") {
+        let mut c = Command::new("cmd");
+        c.arg("/C").arg("fc").arg(left).arg(right);
+        return c;
+    }
+
+    let mut c = Command::new("diff");
+    c.arg("-u").arg(left).arg(right);
+    c
+}
+
+fn launch_compare(app: &mut App) -> Result<()> {
+    app.compare_error = None;
+
+    let (left, right) = match current_group_paths(app) {
+        Ok(v) => v,
+        Err(e) => {
+            let msg = format!("{e:#}");
+            app.compare_error = Some(msg.clone());
+            app.last_error = Some(msg);
+            app.message = "Compare failed".to_string();
+            app.mode = Mode::Error;
+            return Ok(());
+        }
+    };
+
+    if left == right {
+        app.message = "Compare: selected is original".to_string();
+        return Ok(());
+    }
+
+    if app.mode == Mode::Confirm {
+        app.message = "Compare not available in confirm view".to_string();
+        return Ok(());
+    }
+
+    restore_terminal_for_child(app, || {
+        let output = compare_command(&left, &right)
+            .output()
+            .context("run diff")?;
+
+        let mut combined = String::new();
+        combined.push_str(&String::from_utf8_lossy(&output.stdout));
+        combined.push_str(&String::from_utf8_lossy(&output.stderr));
+        let combined = combined.trim().to_string();
+
+        // diff exit codes:
+        //   0 = no differences
+        //   1 = differences found
+        //  >1 = error
+        match output.status.code() {
+            Some(0) => Err(anyhow!("No differences")),
+            Some(1) => Err(anyhow!(if combined.is_empty() {
+                "files differ".to_string()
+            } else {
+                combined
+            })),
+            _ => Err(anyhow!(
+                "diff exited with {}{}{}",
+                output.status,
+                if combined.is_empty() { "" } else { "\n\n" },
+                combined
+            )),
+        }
+    })
+}
+
+fn restore_terminal_for_child<F>(app: &mut App, f: F) -> Result<()>
+where
+    F: FnOnce() -> Result<()>,
+{
+    disable_raw_mode()?;
+    execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
+
+    let res = f();
+
+    enable_raw_mode()?;
+    execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
+
+    match res {
+        Ok(()) => {
+            app.message = "Compare done".to_string();
+            Ok(())
+        }
+        Err(e) => {
+            let msg = format!("{e:#}");
+            app.compare_error = Some(msg.clone());
+            app.last_error = Some(msg);
+            app.message = "Compare".to_string();
+            app.mode = Mode::Error;
+            Ok(())
+        }
+    }
+}
+
 fn ui(f: &mut ratatui::Frame, app: &mut App) {
     let theme = Theme::default();
 
@@ -620,9 +759,10 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     );
 
     let help = match app.mode {
-        Mode::List => "List: Up/Down | Enter pick specific | Space select | c current, n newest, p oldest (uppercase = selected) | a/A confirm | t toggle apply | q quit",
-        Mode::Pick => "Pick: Up/Down | Enter choose | o current | n newest | p oldest | t toggle apply | Esc back",
+        Mode::List => "List: Up/Down | Enter pick specific | Space select | c current, n newest, p oldest (uppercase = selected) | d diff | a/A confirm | t toggle apply | q quit",
+        Mode::Pick => "Pick: Up/Down | Enter choose | o current | n newest | p oldest | d diff | t toggle apply | Esc back",
         Mode::Confirm => "Confirm: y run | t toggle apply | n cancel | Esc back",
+        Mode::Error => "Error: Esc/Enter/q to dismiss",
         Mode::Done => "Done",
     };
 
@@ -654,7 +794,9 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     f.render_widget(header, chunks[0]);
 
     match app.mode {
-        Mode::List | Mode::Confirm | Mode::Done => draw_list(f, app, chunks[1], theme),
+        Mode::List | Mode::Confirm | Mode::Done | Mode::Error => {
+            draw_list(f, app, chunks[1], theme)
+        }
         Mode::Pick => draw_pick(f, app, chunks[1], theme),
     }
 
@@ -662,6 +804,10 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
 
     if app.mode == Mode::Confirm {
         draw_confirm_modal(f, app, chunks[1], theme);
+    }
+
+    if app.mode == Mode::Error {
+        draw_error_modal(f, app, chunks[1], theme);
     }
 }
 
@@ -705,6 +851,41 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+fn draw_error_modal(f: &mut ratatui::Frame, app: &mut App, area: Rect, theme: Theme) {
+    let rect = centered_rect(80, 50, area);
+    f.render_widget(Clear, rect);
+
+    let mut lines = Vec::new();
+    lines.push(Line::from(Span::styled(
+        "ERROR",
+        theme.message_error.add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+
+    if let Some(e) = &app.last_error {
+        for l in e.lines().take((rect.height as usize).saturating_sub(6)) {
+            lines.push(Line::from(l));
+        }
+    } else {
+        lines.push(Line::from("Unknown error"));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("Esc", theme.header_title),
+        Span::styled(": dismiss   ", theme.header_meta),
+        Span::styled("Enter", theme.header_title),
+        Span::styled(": dismiss   ", theme.header_meta),
+        Span::styled("q", theme.header_title),
+        Span::styled(": dismiss", theme.header_meta),
+    ]));
+
+    let p = Paragraph::new(lines)
+        .block(titled_block("", theme))
+        .wrap(Wrap { trim: false });
+    f.render_widget(p, rect);
 }
 
 fn draw_confirm_modal(f: &mut ratatui::Frame, app: &mut App, area: Rect, theme: Theme) {
@@ -894,7 +1075,15 @@ fn draw_footer(f: &mut ratatui::Frame, app: &mut App, area: Rect, theme: Theme) 
         theme.message_info
     };
 
-    let msg = Paragraph::new(Span::styled(app.message.clone(), msg_style))
+    let mut msg_text = app.message.clone();
+    if let Some(e) = &app.compare_error {
+        if !msg_text.is_empty() {
+            msg_text.push('\n');
+        }
+        msg_text.push_str(e);
+    }
+
+    let msg = Paragraph::new(Span::styled(msg_text, msg_style))
         .block(titled_block("Message", theme))
         .wrap(Wrap { trim: true });
     f.render_widget(msg, chunks[0]);
@@ -928,6 +1117,9 @@ mod tests {
             message: String::new(),
             planned_ops: vec![],
             planned_targets: vec![],
+
+            compare_error: None,
+            last_error: None,
         };
         app.list_state.select(None);
         assert_eq!(current_group_len(&app), 0);
@@ -981,6 +1173,9 @@ mod tests {
             message: String::new(),
             planned_ops: vec![],
             planned_targets: vec![],
+
+            compare_error: None,
+            last_error: None,
         };
         app.list_state.select(Some(1));
 
