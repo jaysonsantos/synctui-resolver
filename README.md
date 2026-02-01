@@ -1,5 +1,7 @@
 # synctui-resolver
 
+[![asciicast](https://asciinema.org/a/777605.svg)](https://asciinema.org/a/777605)
+
 A small Rust TUI (Ratatui) for resolving Syncthing `*.sync-conflict-*` files.
 
 It scans a directory tree, groups conflicts by their original/base filename, lets you pick which version to keep (original/newest/specific conflict), and then archives the non-chosen versions.
