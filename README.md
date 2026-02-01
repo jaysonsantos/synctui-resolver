@@ -1,6 +1,6 @@
 # synctui-resolver
 
-[![asciicast](https://asciinema.org/a/777605.svg)](https://asciinema.org/a/777605)
+[![asciicast](https://asciinema.org/a/777622.svg)](https://asciinema.org/a/777622)
 
 A small Rust TUI (Ratatui) for resolving Syncthing `*.sync-conflict-*` files.
 
