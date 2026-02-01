@@ -739,7 +739,7 @@ where
 fn ui(f: &mut ratatui::Frame, app: &mut App) {
     let theme = Theme::default();
 
-    let area = f.size();
+    let area = f.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
