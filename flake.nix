@@ -19,9 +19,10 @@
         inherit system;
       };
 
-      craneLib = crane.lib.${system};
+      craneLib = crane.mkLib pkgs;
 
       src = craneLib.cleanCargoSource ./.;
+      cargoLock = ./Cargo.lock;
 
       commonArgs = {
         inherit src;
@@ -31,12 +32,11 @@
 
         strictDeps = true;
 
-        buildInputs =
-          pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
-            pkgs.libiconv
-            pkgs.darwin.apple_sdk.frameworks.Security
-            pkgs.darwin.apple_sdk.frameworks.SystemConfiguration
-          ];
+        inherit cargoLock;
+
+        buildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
+          pkgs.libiconv
+        ];
       };
 
       cargoArtifacts = craneLib.buildDepsOnly commonArgs;
