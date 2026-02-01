@@ -1,0 +1,32 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+
+  "labels": ["dependencies"],
+  "rangeStrategy": "bump",
+
+  "separateMinorPatch": false,
+  "separateMultipleMajor": true,
+  "separateMajorMinor": true,
+
+  "packageRules": [
+    {
+      "description": "Group all Rust patch+minor updates into one PR",
+      "matchManagers": ["cargo"],
+      "matchUpdateTypes": ["patch", "minor"],
+      "groupName": "rust deps (patch+minor)",
+      "groupSlug": "rust-deps-non-major",
+
+      "automerge": true,
+      "platformAutomerge": true,
+      "automergeType": "pr",
+      "automergeStrategy": "squash"
+    },
+    {
+      "description": "Never automerge major updates",
+      "matchManagers": ["cargo"],
+      "matchUpdateTypes": ["major"],
+      "automerge": false
+    }
+  ]
+}
