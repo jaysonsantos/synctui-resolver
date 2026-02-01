@@ -2,6 +2,10 @@ name: ci
 
 on:
   push:
+    branches:
+      - "**"
+    tags:
+      - "v*"
   pull_request:
   workflow_dispatch:
 
@@ -107,7 +111,7 @@ jobs:
         run: |
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "dist/${{ matrix.bin }}"
-          tar -C dist -czf "stconflict-${{ matrix.target }}.tar.gz" "${{ matrix.bin }}"
+          tar -C dist -czf "synctui-resolver-${{ matrix.target }}.tar.gz" "${{ matrix.bin }}"
 
       - name: Package (windows)
         if: runner.os == 'Windows'
@@ -115,20 +119,42 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/${{ matrix.bin }}${{ matrix.ext }}" "dist/${{ matrix.bin }}${{ matrix.ext }}"
-          Compress-Archive -Path "dist/${{ matrix.bin }}${{ matrix.ext }}" -DestinationPath "stconflict-${{ matrix.target }}.zip" -Force
+          Compress-Archive -Path "dist/${{ matrix.bin }}${{ matrix.ext }}" -DestinationPath "synctui-resolver-${{ matrix.target }}.zip" -Force
 
       - name: Upload artifact (unix)
         if: runner.os != 'Windows'
         uses: actions/upload-artifact@v4
         with:
-          name: stconflict-${{ matrix.target }}
-          path: stconflict-${{ matrix.target }}.tar.gz
+          name: synctui-resolver-${{ matrix.target }}
+          path: synctui-resolver-${{ matrix.target }}.tar.gz
           if-no-files-found: error
 
       - name: Upload artifact (windows)
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
-          name: stconflict-${{ matrix.target }}
-          path: stconflict-${{ matrix.target }}.zip
+          name: synctui-resolver-${{ matrix.target }}
+          path: synctui-resolver-${{ matrix.target }}.zip
           if-no-files-found: error
+
+  release:
+    name: release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/synctui-resolver-*.tar.gz
+            dist/synctui-resolver-*.zip
+          generate_release_notes: true
