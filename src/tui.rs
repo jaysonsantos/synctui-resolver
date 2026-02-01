@@ -21,6 +21,81 @@ use std::io::{self, Stdout};
 use std::path::PathBuf;
 use std::time::{Duration, UNIX_EPOCH};
 
+#[derive(Clone, Copy, Debug)]
+struct Theme {
+    header_title: Style,
+    header_meta: Style,
+    header_help: Style,
+
+    block_title: Style,
+    block_border: Style,
+
+    list_highlight: Style,
+
+    badge_apply: Style,
+    badge_dry_run: Style,
+
+    selected_mark: Style,
+    unpicked: Style,
+
+    message_info: Style,
+    message_warn: Style,
+    message_error: Style,
+
+    confirm_title_apply: Style,
+    confirm_title_dry_run: Style,
+}
+
+impl Theme {
+    fn default() -> Self {
+        Self {
+            header_title: Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+            header_meta: Style::default().fg(Color::Gray),
+            header_help: Style::default().fg(Color::DarkGray),
+
+            block_title: Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+            block_border: Style::default().fg(Color::DarkGray),
+
+            list_highlight: Style::default()
+                .bg(Color::Blue)
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+
+            badge_apply: Style::default()
+                .fg(Color::Black)
+                .bg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+            badge_dry_run: Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+
+            selected_mark: Style::default().fg(Color::Green),
+            unpicked: Style::default().fg(Color::Yellow),
+
+            message_info: Style::default().fg(Color::Cyan),
+            message_warn: Style::default().fg(Color::Yellow),
+            message_error: Style::default().fg(Color::Red),
+
+            confirm_title_apply: Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            confirm_title_dry_run: Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        }
+    }
+}
+
+fn titled_block(title: &str, theme: Theme) -> Block<'_> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.block_border)
+        .title(Span::styled(title, theme.block_title))
+}
+
 #[derive(Parser, Debug, Clone)]
 #[command(
     name = "synctui-resolver",
@@ -523,6 +598,8 @@ fn current_group_len(app: &App) -> usize {
 }
 
 fn ui(f: &mut ratatui::Frame, app: &mut App) {
+    let theme = Theme::default();
+
     let area = f.size();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -534,12 +611,12 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         .split(area);
 
     let mode_badge = Span::styled(
-        if app.apply { "APPLY" } else { "DRY-RUN" },
-        Style::default().fg(if app.apply {
-            Color::Green
+        if app.apply { " APPLY " } else { " DRY-RUN " },
+        if app.apply {
+            theme.badge_apply
         } else {
-            Color::Yellow
-        }),
+            theme.badge_dry_run
+        },
     );
 
     let help = match app.mode {
@@ -564,30 +641,27 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
 
     let header = Paragraph::new(vec![
         Line::from(vec![
-            Span::styled(
-                "synctui-resolver",
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
+            Span::styled("synctui-resolver", theme.header_title),
             Span::raw("  "),
             mode_badge,
             Span::raw("  "),
-            Span::raw(format!("root: {root_short}")),
+            Span::styled(format!("root: {root_short}"), theme.header_meta),
         ]),
-        Line::from(Span::raw(counts)),
-        Line::from(Span::raw(help)),
+        Line::from(Span::styled(counts, theme.header_meta)),
+        Line::from(Span::styled(help, theme.header_help)),
     ])
     .wrap(Wrap { trim: true });
     f.render_widget(header, chunks[0]);
 
     match app.mode {
-        Mode::List | Mode::Confirm | Mode::Done => draw_list(f, app, chunks[1]),
-        Mode::Pick => draw_pick(f, app, chunks[1]),
+        Mode::List | Mode::Confirm | Mode::Done => draw_list(f, app, chunks[1], theme),
+        Mode::Pick => draw_pick(f, app, chunks[1], theme),
     }
 
-    draw_footer(f, app, chunks[2]);
+    draw_footer(f, app, chunks[2], theme);
 
     if app.mode == Mode::Confirm {
-        draw_confirm_modal(f, app, chunks[1]);
+        draw_confirm_modal(f, app, chunks[1], theme);
     }
 }
 
@@ -633,34 +707,26 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         .split(popup_layout[1])[1]
 }
 
-fn draw_confirm_modal(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
+fn draw_confirm_modal(f: &mut ratatui::Frame, app: &mut App, area: Rect, theme: Theme) {
     let rect = centered_rect(80, 70, area);
     f.render_widget(Clear, rect);
 
     let title = if app.apply {
-        Span::styled(
-            "CONFIRM APPLY",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        )
+        Span::styled("CONFIRM APPLY", theme.confirm_title_apply)
     } else {
-        Span::styled(
-            "CONFIRM DRY-RUN",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )
+        Span::styled("CONFIRM DRY-RUN", theme.confirm_title_dry_run)
     };
 
     let mut lines = Vec::new();
     if app.apply {
         lines.push(Line::from(Span::styled(
             "This will move files on disk.",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            theme.message_error.add_modifier(Modifier::BOLD),
         )));
     } else {
         lines.push(Line::from(Span::styled(
             "Dry-run: no filesystem changes.",
-            Style::default().fg(Color::Yellow),
+            theme.message_warn,
         )));
     }
     lines.push(Line::from(""));
@@ -674,12 +740,12 @@ fn draw_confirm_modal(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     lines.push(Line::from(""));
 
     lines.push(Line::from(vec![
-        Span::styled("y", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(": run   "),
-        Span::styled("t", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(": toggle apply   "),
-        Span::styled("n", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(": cancel"),
+        Span::styled("y", theme.header_title),
+        Span::styled(": run   ", theme.header_meta),
+        Span::styled("t", theme.header_title),
+        Span::styled(": toggle apply   ", theme.header_meta),
+        Span::styled("n", theme.header_title),
+        Span::styled(": cancel", theme.header_meta),
     ]));
     lines.push(Line::from(""));
 
@@ -694,51 +760,67 @@ fn draw_confirm_modal(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     }
 
     let p = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(title))
+        .block(titled_block("", theme).title(title))
         .wrap(Wrap { trim: false });
     f.render_widget(p, rect);
 }
 
-fn draw_list(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
+fn draw_list(f: &mut ratatui::Frame, app: &mut App, area: Rect, theme: Theme) {
     let items: Vec<ListItem> = app
         .groups
         .iter()
         .enumerate()
         .map(|(i, g)| {
-            let sel = if app.selected_groups.contains(&i) {
-                "[*]"
+            let (sel, sel_style) = if app.selected_groups.contains(&i) {
+                ("[*]", theme.selected_mark)
             } else {
-                "[ ]"
+                ("[ ]", theme.header_meta)
             };
+
             let picked = match g.chosen {
-                None => "(unpicked)".to_string(),
-                Some(ci) => format!("(keep: {})", g.candidates[ci].label),
+                None => Span::styled("(unpicked)", theme.unpicked),
+                Some(ci) => Span::styled(
+                    format!("(keep: {})", g.candidates[ci].label),
+                    theme.selected_mark,
+                ),
             };
-            let rel = rel_path(&app.root, &g.base_path).display().to_string();
+
+            let rel = Span::styled(
+                rel_path(&app.root, &g.base_path).display().to_string(),
+                Style::default(),
+            );
             let cnt = g.candidates.len().saturating_sub(1);
             let orig = if g.candidates.first().map(|c| c.exists).unwrap_or(false) {
-                "orig"
+                Span::styled("orig", theme.message_info)
             } else {
-                "no-orig"
+                Span::styled("no-orig", theme.message_error)
             };
-            ListItem::new(Line::from(format!(
-                "{sel} {rel}  [{cnt} conflicts, {orig}] {picked}"
-            )))
+
+            ListItem::new(Line::from(vec![
+                Span::styled(sel, sel_style),
+                Span::raw(" "),
+                rel,
+                Span::styled("  [", theme.header_meta),
+                Span::styled(format!("{cnt}"), theme.header_meta),
+                Span::styled(" conflicts, ", theme.header_meta),
+                orig,
+                Span::styled("] ", theme.header_meta),
+                picked,
+            ]))
         })
         .collect();
 
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title("Conflicts"))
-        .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
+        .block(titled_block("Conflicts", theme))
+        .highlight_style(theme.list_highlight);
     f.render_stateful_widget(list, area, &mut app.list_state);
 }
 
-fn draw_pick(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
+fn draw_pick(f: &mut ratatui::Frame, app: &mut App, area: Rect, theme: Theme) {
     let gi = match app.list_state.selected() {
         Some(i) => i,
         None => {
-            let p = Paragraph::new("No group selected")
-                .block(Block::default().borders(Borders::ALL).title("Pick"));
+            let p = Paragraph::new("No group selected").block(titled_block("Pick", theme));
             f.render_widget(p, area);
             return;
         }
@@ -760,34 +842,60 @@ fn draw_pick(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
                 .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
                 .map(|d| d.as_secs().to_string())
                 .unwrap_or_else(|| "?".to_string());
-            let exists = if c.exists { "" } else { "(missing) " };
-            let chosen = if g.chosen == Some(i) { "(picked)" } else { "" };
-            ListItem::new(Line::from(format!(
-                "{}{}  {}  size:{}  mtime:{}  {}",
-                exists, c.label, rel, size, m, chosen
-            )))
+
+            let mut spans = Vec::new();
+            if !c.exists {
+                spans.push(Span::styled("(missing) ", theme.message_error));
+            }
+            spans.push(Span::styled(c.label.clone(), theme.message_info));
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(rel, Style::default()));
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled("size:", theme.header_meta));
+            spans.push(Span::styled(size, theme.header_meta));
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled("mtime:", theme.header_meta));
+            spans.push(Span::styled(m, theme.header_meta));
+            if g.chosen == Some(i) {
+                spans.push(Span::raw("  "));
+                spans.push(Span::styled("(picked)", theme.selected_mark));
+            }
+
+            ListItem::new(Line::from(spans))
         })
         .collect();
 
+    let title = rel_path(&app.root, &g.base_path).display().to_string();
+
     let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(rel_path(&app.root, &g.base_path).display().to_string()),
-        )
-        .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
+        .block(titled_block(&title, theme))
+        .highlight_style(theme.list_highlight);
 
     f.render_stateful_widget(list, area, &mut app.pick_state);
 }
 
-fn draw_footer(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
+fn draw_footer(f: &mut ratatui::Frame, app: &mut App, area: Rect, theme: Theme) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
         .split(area);
 
-    let msg = Paragraph::new(app.message.clone())
-        .block(Block::default().borders(Borders::ALL).title("Message"))
+    let msg_style = if app.message.to_ascii_lowercase().contains("fail")
+        || app.message.to_ascii_lowercase().contains("error")
+    {
+        theme.message_error
+    } else if app.message.to_ascii_lowercase().contains("cancel")
+        || app.message.to_ascii_lowercase().contains("dry-run")
+        || app.message.to_ascii_lowercase().contains("pick")
+        || app.message.to_ascii_lowercase().contains("no ")
+    {
+        theme.message_warn
+    } else {
+        theme.message_info
+    };
+
+    let msg = Paragraph::new(Span::styled(app.message.clone(), msg_style))
+        .block(titled_block("Message", theme))
         .wrap(Wrap { trim: true });
     f.render_widget(msg, chunks[0]);
 
@@ -797,7 +905,7 @@ fn draw_footer(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
         app.planned_ops.join("\n")
     };
     let plan = Paragraph::new(plan_text)
-        .block(Block::default().borders(Borders::ALL).title("Plan / Log"))
+        .block(titled_block("Plan / Log", theme))
         .wrap(Wrap { trim: false });
     f.render_widget(plan, chunks[1]);
 }
